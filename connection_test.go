@@ -11,6 +11,8 @@ package mysql
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
+	"net"
 	"testing"
 )
 
@@ -67,6 +69,24 @@ func TestInterpolateParamsPlaceholderInString(t *testing.T) {
 	}
 }
 
+func TestInterpolateParamsUint64(t *testing.T) {
+	mc := &mysqlConn{
+		buf:              newBuffer(nil),
+		maxAllowedPacket: maxPacketSize,
+		cfg: &Config{
+			InterpolateParams: true,
+		},
+	}
+
+	q, err := mc.interpolateParams("SELECT ?", []driver.Value{uint64(42)})
+	if err != nil {
+		t.Errorf("Expected err=nil, got err=%#v, q=%#v", err, q)
+	}
+	if q != "SELECT 42" {
+		t.Errorf("Expected uint64 interpolation to work, got q=%#v", q)
+	}
+}
+
 func TestCheckNamedValue(t *testing.T) {
 	value := driver.NamedValue{Value: ^uint64(0)}
 	x := &mysqlConn{}
@@ -76,8 +96,8 @@ func TestCheckNamedValue(t *testing.T) {
 		t.Fatal("uint64 high-bit not convertible", err)
 	}
 
-	if value.Value != "18446744073709551615" {
-		t.Fatalf("uint64 high-bit not converted, got %#v %T", value.Value, value.Value)
+	if value.Value != ^uint64(0) {
+		t.Fatalf("uint64 high-bit converted, got %#v %T", value.Value, value.Value)
 	}
 }
 
@@ -107,4 +127,49 @@ func TestCleanCancel(t *testing.T) {
 			t.Error("expected watching is false, but true")
 		}
 	}
+}
+
+func TestPingMarkBadConnection(t *testing.T) {
+	nc := badConnection{err: errors.New("boom")}
+	ms := &mysqlConn{
+		netConn:          nc,
+		buf:              newBuffer(nc),
+		maxAllowedPacket: defaultMaxAllowedPacket,
+	}
+
+	err := ms.Ping(context.Background())
+
+	if err != driver.ErrBadConn {
+		t.Errorf("expected driver.ErrBadConn, got  %#v", err)
+	}
+}
+
+func TestPingErrInvalidConn(t *testing.T) {
+	nc := badConnection{err: errors.New("failed to write"), n: 10}
+	ms := &mysqlConn{
+		netConn:          nc,
+		buf:              newBuffer(nc),
+		maxAllowedPacket: defaultMaxAllowedPacket,
+		closech:          make(chan struct{}),
+	}
+
+	err := ms.Ping(context.Background())
+
+	if err != ErrInvalidConn {
+		t.Errorf("expected ErrInvalidConn, got  %#v", err)
+	}
+}
+
+type badConnection struct {
+	n   int
+	err error
+	net.Conn
+}
+
+func (bc badConnection) Write(b []byte) (n int, err error) {
+	return bc.n, bc.err
+}
+
+func (bc badConnection) Close() error {
+	return nil
 }
